@@ -1,0 +1,127 @@
+name: Copilot Setup Steps
+
+on:
+  workflow_call:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+  pull_request:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+
+jobs:
+  copilot-setup-steps:
+    name: Prepare Copilot Agent Environment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add local bins to PATH
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          echo "$HOME/.luarocks/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Cache LuaRocks
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.luarocks
+            ~/.cache/luarocks
+          key: luarocks-${{ runner.os }}-lua52-busted2-luacheck1
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+          key: npm-${{ runner.os }}-prettier-3
+
+      - name: Cache Stylua
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/bin/stylua
+          key: stylua-${{ runner.os }}-0.21
+
+      - name: Cache mdBook + mermaid
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/bin/mdbook
+            ~/.local/bin/mdbook-mermaid
+          key: mdbook-${{ runner.os }}-0.4.40-mermaid-0.16.2
+
+      - name: Install system packages (Lua 5.2, Rocks, tools)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            lua5.2 lua5.2-dev luarocks \
+            shellcheck zip unzip curl wget ca-certificates
+
+      - name: Install Lua tooling (busted, luacheck, luacov)
+        run: |
+          luarocks --version
+          mkdir -p "$HOME/.luarocks"
+          # Install tools in user tree to avoid permission issues
+          luarocks --lua-version=5.2 --local install busted
+          luarocks --lua-version=5.2 --local install luacheck
+          luarocks --lua-version=5.2 --local install luacov
+          # Ensure user tree bin is on PATH for subsequent steps
+
+
+      - name: Install Stylua 0.21.x
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          if [[ ! -x "$HOME/.local/bin/stylua" ]]; then
+            tmpdir="$(mktemp -d)"
+            pushd "$tmpdir" >/dev/null
+            wget -q https://github.com/JohnnyMorganz/StyLua/releases/latest/download/stylua-linux-x86_64.zip
+            unzip -q stylua-linux-x86_64.zip
+            install -m 0755 stylua "$HOME/.local/bin/stylua"
+            popd >/dev/null
+            rm -rf "$tmpdir"
+          fi
+          stylua --version || true
+
+      - name: Setup Node.js LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+
+      - name: Install Prettier
+        run: |
+          npm config set fund false
+          npm config set audit false
+          npm install -g prettier
+          prettier --version || true
+
+      - name: Install mdBook 0.4.40 and mdbook-mermaid 0.16.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          MDBOOK_BIN="$HOME/.local/bin/mdbook"
+          MERMAID_BIN="$HOME/.local/bin/mdbook-mermaid"
+          if [[ ! -x "$MDBOOK_BIN" ]]; then
+            tmpdir="$(mktemp -d)"
+            pushd "$tmpdir" >/dev/null
+            wget -q https://github.com/rust-lang/mdBook/releases/download/v0.4.40/mdbook-v0.4.40-x86_64-unknown-linux-gnu.tar.gz
+            tar -xzf mdbook-v0.4.40-x86_64-unknown-linux-gnu.tar.gz
+            install -m 0755 mdbook "$MDBOOK_BIN"
+            popd >/dev/null
+            rm -rf "$tmpdir"
+          fi
+          if [[ ! -x "$MERMAID_BIN" ]]; then
+            tmpdir="$(mktemp -d)"
+            pushd "$tmpdir" >/dev/null
+            wget -q https://github.com/badboy/mdbook-mermaid/releases/download/v0.16.2/mdbook-mermaid-v0.16.2-x86_64-unknown-linux-gnu.tar.gz
+            tar -xzf mdbook-mermaid-v0.16.2-x86_64-unknown-linux-gnu.tar.gz
+            install -m 0755 mdbook-mermaid "$MERMAID_BIN"
+            popd >/dev/null
+            rm -rf "$tmpdir"
+          fi
+          "$MDBOOK_BIN" --version || true
+          "$MERMAID_BIN" --version || true
