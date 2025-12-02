@@ -201,6 +201,87 @@ if not package.preload["ffi/util"] then
     end
 end
 
+-- Mock ffi/posix_h module (FFI bindings not available in test environment)
+if not package.preload["ffi/posix_h"] then
+    package.preload["ffi/posix_h"] = function()
+        -- Stub - actual FFI declarations are not needed in tests
+        return {}
+    end
+end
+
+-- Mock ffi/linux_input_h module (FFI bindings not available in test environment)
+if not package.preload["ffi/linux_input_h"] then
+    package.preload["ffi/linux_input_h"] = function()
+        -- Stub - actual FFI declarations are not needed in tests
+        return {}
+    end
+end
+
+-- Mock src/lib/bluetooth/bluetooth_input_reader module (uses FFI)
+if not package.preload["src/lib/bluetooth/bluetooth_input_reader"] then
+    package.preload["src/lib/bluetooth/bluetooth_input_reader"] = function()
+        local MockBluetoothInputReader = {
+            fd = nil,
+            device_path = nil,
+            is_open = false,
+            callbacks = {},
+        }
+
+        function MockBluetoothInputReader:new()
+            local instance = {
+                fd = nil,
+                device_path = nil,
+                is_open = false,
+                callbacks = {},
+            }
+            setmetatable(instance, self)
+            self.__index = self
+
+            return instance
+        end
+
+        function MockBluetoothInputReader:open(device_path)
+            self.device_path = device_path
+            self.is_open = true
+            self.fd = 999 -- Mock file descriptor
+
+            return true
+        end
+
+        function MockBluetoothInputReader:close()
+            self.fd = nil
+            self.device_path = nil
+            self.is_open = false
+        end
+
+        function MockBluetoothInputReader:registerKeyCallback(callback)
+            table.insert(self.callbacks, callback)
+        end
+
+        function MockBluetoothInputReader:clearCallbacks()
+            self.callbacks = {}
+        end
+
+        function MockBluetoothInputReader:poll(timeout_ms)
+            return nil -- No events by default
+        end
+
+        function MockBluetoothInputReader:isOpen()
+            return self.is_open
+        end
+
+        function MockBluetoothInputReader:getDevicePath()
+            return self.device_path
+        end
+
+        function MockBluetoothInputReader:getFd()
+            return self.fd
+        end
+
+        return MockBluetoothInputReader
+    end
+end
+
 -- Mock dispatcher module
 if not package.preload["dispatcher"] then
     package.preload["dispatcher"] = function()
@@ -784,6 +865,7 @@ if not package.preload["ui/uimanager"] then
             _send_event_calls = {},
             _prevent_standby_calls = 0,
             _allow_standby_calls = 0,
+            _scheduled_tasks = {},
             -- Configurable behavior
             _show_return_value = true,
         }
@@ -824,6 +906,23 @@ if not package.preload["ui/uimanager"] then
             -- No-op in tests
         end
 
+        function UIManager:scheduleIn(time, callback)
+            if self._scheduled_tasks == nil then
+                self._scheduled_tasks = {}
+            end
+
+            local task_id = #self._scheduled_tasks + 1
+            self._scheduled_tasks[task_id] = { time = time, callback = callback }
+
+            return task_id
+        end
+
+        function UIManager:unschedule(task_id)
+            if self._scheduled_tasks then
+                self._scheduled_tasks[task_id] = nil
+            end
+        end
+
         -- Helper to reset call tracking
         function UIManager:_reset()
             self._show_calls = {}
@@ -833,6 +932,7 @@ if not package.preload["ui/uimanager"] then
             self._send_event_calls = {}
             self._prevent_standby_calls = 0
             self._allow_standby_calls = 0
+            self._scheduled_tasks = {}
             self._show_return_value = true
         end
 

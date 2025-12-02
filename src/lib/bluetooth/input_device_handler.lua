@@ -1,16 +1,26 @@
 ---
 -- Bluetooth input device handler.
 -- Manages opening and closing of Bluetooth input devices for key event handling.
+--
+-- Uses a dedicated BluetoothInputReader that only reads from Bluetooth devices,
+-- providing clean separation from other input sources (touchscreen, built-in buttons).
+-- This allows key bindings to be processed exclusively for Bluetooth input.
 
-local Device = require("device")
+local BluetoothInputReader = require("src/lib/bluetooth/bluetooth_input_reader")
 local InfoMessage = require("ui/widget/infomessage")
 local UIManager = require("ui/uimanager")
 local _ = require("gettext")
 local logger = require("logger")
 
 local InputDeviceHandler = {
-    bt_input_devices = {},
     input_device_path = "/dev/input/event4",
+    -- Isolated readers for Bluetooth-only input (keyed by device address)
+    isolated_readers = {},
+    -- Callbacks for isolated reader events
+    key_event_callbacks = {},
+    -- Callbacks for device open/close events
+    device_open_callbacks = {},
+    device_close_callbacks = {},
 }
 
 ---
@@ -21,8 +31,11 @@ function InputDeviceHandler:new()
     setmetatable(instance, self)
     self.__index = self
 
-    instance.bt_input_devices = {}
     instance.input_device_path = "/dev/input/event4"
+    instance.isolated_readers = {}
+    instance.key_event_callbacks = {}
+    instance.device_open_callbacks = {}
+    instance.device_close_callbacks = {}
 
     return instance
 end
@@ -267,10 +280,27 @@ function InputDeviceHandler:waitForBluetoothInputDevice(timeout, poll_interval)
 end
 
 ---
--- Opens the Bluetooth input device for reading key events.
---
--- This function integrates the device with KOReader's input system, allowing
--- key events from Bluetooth devices to be processed by the application.
+-- Automatically opens input devices for all connected paired devices.
+-- @param paired_devices table Array of paired device information
+function InputDeviceHandler:autoOpenConnectedDevices(paired_devices)
+    logger.dbg("InputDeviceHandler: Auto-opening connected devices")
+
+    for _, device in ipairs(paired_devices) do
+        if device.connected then
+            logger.info("InputDeviceHandler: Found connected device on startup:", device.name or device.address)
+
+            local success = self:openIsolatedInputDevice(device, false, false)
+
+            if success then
+                logger.info("InputDeviceHandler: Auto-opened input device for", device.name or device.address)
+            end
+        end
+    end
+end
+
+---
+-- Opens a Bluetooth input device using the isolated reader.
+-- This bypasses KOReader's main input system, providing events only from Bluetooth devices.
 --
 -- Device detection strategy (in order of preference):
 --   1. Wait for new device: If wait_for_device=true, poll for new devices first
@@ -290,14 +320,13 @@ end
 -- @param show_messages boolean Optional, whether to show UI messages (default: true)
 -- @param wait_for_device boolean Optional, whether to wait for device to appear (default: false)
 -- @return boolean True if successfully opened, false otherwise
-function InputDeviceHandler:openInputDevice(device_info, show_messages, wait_for_device)
+function InputDeviceHandler:openIsolatedInputDevice(device_info, show_messages, wait_for_device)
     if show_messages == nil then
         show_messages = true
     end
 
     local detected_path
 
-    -- Strategy 1: Wait for new device if requested
     if wait_for_device then
         logger.dbg("InputDeviceHandler: Waiting for input device to appear...")
         detected_path = self:waitForBluetoothInputDevice()
@@ -307,7 +336,6 @@ function InputDeviceHandler:openInputDevice(device_info, show_messages, wait_for
         end
     end
 
-    -- Strategy 2: Try name matching if we don't have a path yet
     if not detected_path and device_info.name then
         detected_path = self:findDeviceByName(device_info.name)
 
@@ -316,17 +344,22 @@ function InputDeviceHandler:openInputDevice(device_info, show_messages, wait_for
         end
     end
 
-    -- Strategy 3: Fall back to auto-detection
     if not detected_path then
         detected_path = self:_autoDetectInputDevice()
     end
 
-    logger.info("InputDeviceHandler: Opening Bluetooth input device:", detected_path, "for", device_info.address)
+    logger.info(
+        "InputDeviceHandler: Opening isolated Bluetooth input device:",
+        detected_path,
+        "for",
+        device_info.address
+    )
 
-    local f = io.open(detected_path, "r")
+    local reader = BluetoothInputReader:new()
+    local success = reader:open(detected_path)
 
-    if not f then
-        logger.warn("InputDeviceHandler: Input device", detected_path, "not found")
+    if not success then
+        logger.warn("InputDeviceHandler: Failed to open isolated reader for", detected_path)
 
         if show_messages then
             UIManager:show(InfoMessage:new({
@@ -338,33 +371,22 @@ function InputDeviceHandler:openInputDevice(device_info, show_messages, wait_for
         return false
     end
 
-    f:close()
-
-    local status, err = pcall(function()
-        if not Device.input then
-            error("Device.input not available")
-        end
-
-        Device.input:close(detected_path)
-        Device.input:open(detected_path)
-
-        logger.info("InputDeviceHandler: Successfully opened", detected_path)
-    end)
-
-    if not status then
-        logger.warn("InputDeviceHandler: Failed to open input device:", err)
-
-        if show_messages then
-            UIManager:show(InfoMessage:new({
-                text = _("Failed to open Bluetooth input device: ") .. tostring(err),
-                timeout = 3,
-            }))
-        end
-
-        return false
+    for _, callback in ipairs(self.key_event_callbacks) do
+        reader:registerKeyCallback(callback)
     end
 
-    self.bt_input_devices[device_info.address] = detected_path
+    self.isolated_readers[device_info.address] = {
+        reader = reader,
+        device_path = detected_path,
+    }
+
+    for _, callback in ipairs(self.device_open_callbacks) do
+        local ok, err = pcall(callback, device_info.address, detected_path)
+
+        if not ok then
+            logger.warn("InputDeviceHandler: Device open callback error:", err)
+        end
+    end
 
     if show_messages then
         UIManager:show(InfoMessage:new({
@@ -377,51 +399,146 @@ function InputDeviceHandler:openInputDevice(device_info, show_messages, wait_for
 end
 
 ---
--- Closes the Bluetooth input device.
+-- Closes an isolated Bluetooth input device.
 -- @param device_info table Device information with address
-function InputDeviceHandler:closeInputDevice(device_info)
-    local input_device_path = self.bt_input_devices[device_info.address]
+function InputDeviceHandler:closeIsolatedInputDevice(device_info)
+    local reader_info = self.isolated_readers[device_info.address]
 
-    if not input_device_path then
-        logger.dbg("InputDeviceHandler: No opened input device for", device_info.address)
+    if not reader_info then
+        logger.dbg("InputDeviceHandler: No isolated reader for", device_info.address)
 
         return
     end
 
-    logger.info("InputDeviceHandler: Closing Bluetooth input device:", input_device_path)
+    local device_path = reader_info.device_path
 
-    local status, err = pcall(function()
-        if Device.input then
-            Device.input:close(input_device_path)
+    logger.info("InputDeviceHandler: Closing isolated reader for", device_info.address)
+
+    reader_info.reader:close()
+    self.isolated_readers[device_info.address] = nil
+
+    for _, callback in ipairs(self.device_close_callbacks) do
+        local ok, err = pcall(callback, device_info.address, device_path)
+
+        if not ok then
+            logger.warn("InputDeviceHandler: Device close callback error:", err)
         end
-    end)
-
-    if not status then
-        logger.warn("InputDeviceHandler: Failed to close input device:", err)
     end
-
-    self.bt_input_devices[device_info.address] = nil
-
-    logger.dbg("InputDeviceHandler: Bluetooth input device closed")
 end
 
 ---
--- Automatically opens input devices for all connected paired devices.
--- @param paired_devices table Array of paired device information
-function InputDeviceHandler:autoOpenConnectedDevices(paired_devices)
-    logger.dbg("InputDeviceHandler: Auto-opening connected devices")
+-- Registers a callback for key events from isolated readers.
+-- This callback will receive events ONLY from Bluetooth devices.
+--
+-- @param callback function Callback function(key_code, key_value, time, device_path) where:
+--   - key_code: The key code (ev.code)
+--   - key_value: 1 for press, 0 for release, 2 for repeat
+--   - time: Event timestamp table with sec and usec fields
+--   - device_path: Path to the input device (e.g., "/dev/input/event4")
+function InputDeviceHandler:registerKeyEventCallback(callback)
+    table.insert(self.key_event_callbacks, callback)
 
-    for _, device in ipairs(paired_devices) do
-        if device.connected then
-            logger.info("InputDeviceHandler: Found connected device on startup:", device.name or device.address)
+    for _, reader_info in pairs(self.isolated_readers) do
+        reader_info.reader:registerKeyCallback(callback)
+    end
 
-            local success = self:openInputDevice(device, false, false)
+    logger.dbg("InputDeviceHandler: Registered key event callback")
+end
 
-            if success then
-                logger.info("InputDeviceHandler: Auto-opened input device for", device.name or device.address)
+---
+-- Registers a callback for device open events.
+-- Called when an isolated input device is successfully opened.
+--
+-- @param callback function Callback function(device_address, device_path) where:
+--   - device_address: MAC address of the Bluetooth device
+--   - device_path: Path to the input device (e.g., "/dev/input/event4")
+function InputDeviceHandler:registerDeviceOpenCallback(callback)
+    table.insert(self.device_open_callbacks, callback)
+    logger.dbg("InputDeviceHandler: Registered device open callback")
+end
+
+---
+-- Registers a callback for device close events.
+-- Called when an isolated input device is closed.
+--
+-- @param callback function Callback function(device_address, device_path) where:
+--   - device_address: MAC address of the Bluetooth device
+--   - device_path: Path to the input device that was closed
+function InputDeviceHandler:registerDeviceCloseCallback(callback)
+    table.insert(self.device_close_callbacks, callback)
+    logger.dbg("InputDeviceHandler: Registered device close callback")
+end
+
+---
+-- Clears all registered key event callbacks.
+function InputDeviceHandler:clearKeyEventCallbacks()
+    self.key_event_callbacks = {}
+
+    for _, reader_info in pairs(self.isolated_readers) do
+        reader_info.reader:clearCallbacks()
+    end
+
+    logger.dbg("InputDeviceHandler: Cleared all key event callbacks")
+end
+
+---
+-- Polls all isolated readers for input events.
+-- Should be called periodically (e.g., via UIManager scheduling).
+--
+-- @param timeout_ms number Optional timeout in milliseconds (default: 0 for non-blocking)
+-- @return table|nil Array of all events from all Bluetooth devices, or nil if none
+function InputDeviceHandler:pollIsolatedReaders(timeout_ms)
+    local all_events = {}
+
+    for address, reader_info in pairs(self.isolated_readers) do
+        local events = reader_info.reader:poll(timeout_ms)
+
+        if events then
+            for _, ev in ipairs(events) do
+                local new_ev = {}
+
+                for k, v in pairs(ev) do
+                    new_ev[k] = v
+                end
+
+                new_ev.device_address = address
+                table.insert(all_events, new_ev)
             end
         end
     end
+
+    if #all_events > 0 then
+        return all_events
+    end
+
+    return nil
+end
+
+---
+-- Gets the isolated reader for a specific device
+-- @param device_address string MAC address of the device
+-- @return table|nil The BluetoothInputReader instance or nil if not open
+function InputDeviceHandler:getIsolatedReader(device_address)
+    local reader_info = self.isolated_readers[device_address]
+
+    if reader_info then
+        return reader_info.reader
+    end
+
+    return nil
+end
+
+---
+-- Checks if any isolated readers are open.
+-- @return boolean True if at least one isolated reader is open
+function InputDeviceHandler:hasIsolatedReaders()
+    for _, reader_info in pairs(self.isolated_readers) do
+        if reader_info.reader:isOpen() then
+            return true
+        end
+    end
+
+    return false
 end
 
 return InputDeviceHandler

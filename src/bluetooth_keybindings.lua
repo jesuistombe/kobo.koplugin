@@ -9,7 +9,6 @@
 -- - Trigger KOReader events based on captured keys
 
 local AvailableActions = require("src/lib/bluetooth/available_actions")
-local Device = require("device")
 local Event = require("ui/event")
 local InfoMessage = require("ui/widget/infomessage")
 local InputContainer = require("ui/widget/container/inputcontainer")
@@ -23,27 +22,97 @@ local BluetoothKeyBindings = InputContainer:extend({
     name = "bluetooth_keybindings",
     key_events = {},
     device_bindings = {}, -- { device_mac -> { key_name -> action_name } }
+    device_path_to_address = {}, -- { device_path -> device_mac } for lookup during events
     is_capturing = false,
     capture_callback = nil,
-    input_device_handle = nil,
     settings = nil,
     save_callback = nil,
     capture_info_message = nil,
+    input_device_handler = nil,
+    poll_task = nil,
+    poll_interval = 0.05, -- 50ms polling interval
 })
 
 ---
--- Initializes the Bluetooth key bindings manager.
--- Loads persisted bindings from settings.
--- @param save_callback function Function to call when settings need to be saved
--- @param parent_container table Optional parent InputContainer to notify of key_events changes
-function BluetoothKeyBindings:init(save_callback, parent_container)
+-- Basic initialization (called automatically by Widget:new).
+-- Does minimal setup; full initialization happens in setup().
+function BluetoothKeyBindings:init()
     self.key_events = {}
     self.device_bindings = {}
+    self.device_path_to_address = {}
+end
+
+---
+-- Sets up the Bluetooth key bindings manager with callbacks.
+-- Loads persisted bindings from settings.
+-- @param save_callback function Function to call when settings need to be saved
+-- @param input_device_handler table InputDeviceHandler instance for isolated Bluetooth input
+function BluetoothKeyBindings:setup(save_callback, input_device_handler)
     self.save_callback = save_callback
-    self.parent_container = parent_container
-    self.input_device = Device.input
+    self.input_device_handler = input_device_handler
+
+    if self.input_device_handler then
+        self.input_device_handler:registerKeyEventCallback(function(key_code, key_value, time, device_path)
+            self:onBluetoothKeyEvent(key_code, key_value, time, device_path)
+        end)
+
+        self.input_device_handler:registerDeviceOpenCallback(function(device_address, device_path)
+            self:setDevicePathMapping(device_path, device_address)
+        end)
+
+        self.input_device_handler:registerDeviceCloseCallback(function(device_address, device_path)
+            self:removeDevicePathMapping(device_path)
+        end)
+    end
 
     self:loadBindings()
+end
+
+---
+-- Starts polling for Bluetooth input events.
+-- Should be called when Bluetooth devices are connected.
+function BluetoothKeyBindings:startPolling()
+    if self.poll_task then
+        logger.dbg("BluetoothKeyBindings: Already polling, skipping start")
+
+        return
+    end
+
+    if not self.input_device_handler then
+        logger.warn("BluetoothKeyBindings: No input_device_handler, cannot start polling")
+
+        return
+    end
+
+    logger.info("BluetoothKeyBindings: Starting Bluetooth input polling")
+
+    local function poll()
+        local has_readers = self.input_device_handler:hasIsolatedReaders()
+
+        if has_readers then
+            self.input_device_handler:pollIsolatedReaders(0)
+        end
+
+        if has_readers then
+            self.poll_task = UIManager:scheduleIn(self.poll_interval, poll)
+        else
+            self.poll_task = nil
+            logger.info("BluetoothKeyBindings: Stopped polling (no readers)")
+        end
+    end
+
+    self.poll_task = UIManager:scheduleIn(self.poll_interval, poll)
+    logger.info("BluetoothKeyBindings: Poll task scheduled with interval:", self.poll_interval)
+end
+
+---
+-- Stops polling for Bluetooth input events.
+function BluetoothKeyBindings:stopPolling()
+    if self.poll_task then
+        UIManager:unschedule(self.poll_task)
+        self.poll_task = nil
+        logger.dbg("BluetoothKeyBindings: Stopped Bluetooth input polling")
+    end
 end
 
 ---
@@ -56,14 +125,7 @@ function BluetoothKeyBindings:loadBindings()
 
     self.device_bindings = self.settings.bluetooth_key_bindings or {}
 
-    for device_mac, bindings in pairs(self.device_bindings) do
-        for key_name, action_id in pairs(bindings) do
-            self:applyBinding(device_mac, key_name, action_id)
-        end
-    end
-
     local count = 0
-
     for _ in pairs(self.device_bindings) do
         count = count + 1
     end
@@ -89,49 +151,6 @@ function BluetoothKeyBindings:saveBindings()
 end
 
 ---
--- Applies a key binding to the InputContainer key_events table.
--- @param device_mac string MAC address of the Bluetooth device
--- @param key_name string Name of the key (e.g., "BTPageNext")
--- @param action_id string ID of the action to bind
-function BluetoothKeyBindings:applyBinding(device_mac, key_name, action_id)
-    local action = self:getActionById(action_id)
-
-    if not action then
-        logger.warn("BluetoothKeyBindings: Unknown action ID:", action_id)
-        return
-    end
-
-    local event_name = "BT_" .. device_mac:gsub(":", "") .. "_" .. key_name
-
-    self.key_events[event_name] = {
-        { key_name },
-        event = event_name,
-    }
-
-    local handler_name = "on" .. event_name
-
-    self[handler_name] = function()
-        logger.dbg("BluetoothKeyBindings: Triggering", action.event, "with args:", action.args, "for", event_name)
-
-        if action.args then
-            UIManager:sendEvent(Event:new(action.event, action.args))
-        end
-
-        if not action.args then
-            UIManager:sendEvent(Event:new(action.event))
-        end
-
-        return true
-    end
-
-    if self.parent_container and self.parent_container.mergeKeyEvents then
-        self.parent_container:mergeKeyEvents()
-    end
-
-    logger.dbg("BluetoothKeyBindings: Applied binding", key_name, "->", action_id, "for device", device_mac)
-end
-
----
 -- Removes a key binding.
 -- @param device_mac string MAC address of the Bluetooth device
 -- @param key_name string Name of the key to unbind
@@ -147,9 +166,6 @@ function BluetoothKeyBindings:removeBinding(device_mac, key_name)
     end
 
     self.device_bindings[device_mac][key_name] = nil
-
-    local event_name = "BT_" .. device_mac:gsub(":", "") .. "_" .. key_name
-    self.key_events[event_name] = nil
 
     self:saveBindings()
 
@@ -179,7 +195,65 @@ function BluetoothKeyBindings:getDeviceBindings(device_mac)
 end
 
 ---
--- Starts capturing a key press from the user by intercepting input events.
+-- Sets the mapping from device path to device address.
+-- This allows looking up the correct device when receiving input events.
+-- @param device_path string Path to the input device (e.g., "/dev/input/event4")
+-- @param device_mac string MAC address of the Bluetooth device
+function BluetoothKeyBindings:setDevicePathMapping(device_path, device_mac)
+    if not device_path or not device_mac then
+        return
+    end
+
+    self.device_path_to_address[device_path] = device_mac
+    logger.dbg("BluetoothKeyBindings: Mapped", device_path, "to", device_mac)
+end
+
+---
+-- Removes the mapping for a device path.
+-- Should be called when a device is disconnected.
+-- @param device_path string Path to the input device
+function BluetoothKeyBindings:removeDevicePathMapping(device_path)
+    if not device_path then
+        return
+    end
+
+    self.device_path_to_address[device_path] = nil
+    logger.dbg("BluetoothKeyBindings: Removed mapping for", device_path)
+end
+
+---
+-- Removes the mapping for a device by its MAC address.
+-- Should be called when a device is disconnected.
+-- @param device_mac string MAC address of the Bluetooth device
+function BluetoothKeyBindings:removeDevicePathMappingByAddress(device_mac)
+    if not device_mac then
+        return
+    end
+
+    for path, mac in pairs(self.device_path_to_address) do
+        if mac == device_mac then
+            self.device_path_to_address[path] = nil
+            logger.dbg("BluetoothKeyBindings: Removed mapping for", path, "(device:", device_mac, ")")
+        end
+    end
+end
+
+---
+-- Gets the device path for a given MAC address.
+-- @param device_mac string MAC address of the Bluetooth device
+-- @return string|nil Device path or nil if not found
+function BluetoothKeyBindings:getDevicePathByAddress(device_mac)
+    for path, mac in pairs(self.device_path_to_address) do
+        if mac == device_mac then
+            return path
+        end
+    end
+
+    return nil
+end
+
+---
+-- Starts capturing a key press from the user.
 -- @param device_mac string MAC address of the device
 -- @param action_id string ID of the action to bind
 -- @param callback function Function to call when key is captured
@@ -189,67 +263,98 @@ function BluetoothKeyBindings:startKeyCapture(device_mac, action_id, callback)
     self.capture_device_mac = device_mac
     self.capture_action_id = action_id
 
-    logger.dbg("BluetoothKeyBindings: Registering event adjust hook for key capture")
-
-    self.input_device:registerEventAdjustHook(function(input, ev)
-        self:onRawInputEvent(ev)
-    end)
+    logger.dbg("BluetoothKeyBindings: Started key capture for device", device_mac, "action", action_id)
 
     self.capture_info_message = InfoMessage:new({
-        text = _("Press a button on your Bluetooth device now...\n\nPress the back button to cancel."),
+        text = _("Press a button on your Bluetooth device now...\n\nTap the screen to cancel."),
+        dismissable = true,
+        dismiss_callback = function()
+            if self.is_capturing then
+                self:stopKeyCapture()
+                UIManager:scheduleIn(0.1, function()
+                    UIManager:show(InfoMessage:new({
+                        text = _("Key capture cancelled"),
+                    }))
+                end)
+            end
+        end,
     })
+
     UIManager:show(self.capture_info_message)
 
-    logger.dbg("BluetoothKeyBindings: Started key capture for device", device_mac, "action", action_id)
+    self:startPolling()
+
     logger.info("BluetoothKeyBindings: Waiting for button press from Bluetooth device...")
 end
 
 ---
--- Handles raw input events from the eventAdjustHook during key capture.
--- This is called directly from the Input device before event processing.
--- @param ev table Raw input_event structure from the device
-function BluetoothKeyBindings:onRawInputEvent(ev)
-    if not self.is_capturing then
+-- Handles key events from the isolated Bluetooth reader.
+-- This callback receives events ONLY from Bluetooth devices.
+-- @param key_code number The key code
+-- @param key_value number 1 for press, 0 for release, 2 for repeat
+-- @param time table Event timestamp with sec and usec fields
+-- @param device_path string Path to the input device (e.g., "/dev/input/event4")
+function BluetoothKeyBindings:onBluetoothKeyEvent(key_code, key_value, time, device_path)
+    -- Only handle key press events (value == 1)
+    if key_value ~= 1 then
         return
     end
 
-    local C = Device.input.C or {
-        EV_KEY = 0x01,
-    }
+    local key_name = "KEY_" .. key_code
 
-    if ev.type ~= C.EV_KEY or ev.value ~= 1 then
+    logger.dbg("BluetoothKeyBindings: Bluetooth key event:", key_name, "code:", key_code, "from:", device_path)
+
+    if self.is_capturing then
+        logger.info("BluetoothKeyBindings: Captured Bluetooth key:", key_name)
+        self:captureKey(key_name)
+
         return
     end
 
-    local key_code = ev.code
-    local key_name = nil
+    local device_mac = self.device_path_to_address[device_path]
 
-    if Device.input.event_map and Device.input.event_map[key_code] then
-        key_name = Device.input.event_map[key_code]
+    if not device_mac then
+        logger.warn("BluetoothKeyBindings: Unknown device path:", device_path, "- no mapping found")
+
+        return
     end
 
-    if not key_name then
-        key_name = ev.code_name or ("KEY_" .. key_code)
+    local bindings = self.device_bindings[device_mac]
+
+    if not bindings then
+        logger.dbg("BluetoothKeyBindings: No bindings for device:", device_mac)
+
+        return
     end
 
-    logger.info("BluetoothKeyBindings: Raw key event captured:", key_name, "code:", key_code)
+    local action_id = bindings[key_name]
 
-    self:captureKey(key_name)
-end
+    if not action_id then
+        logger.dbg("BluetoothKeyBindings: No binding for key:", key_name, "on device:", device_mac)
 
----
--- Handles input events during key capture.
--- Note: This is called from the event hook chain but event hooks don't pass event data.
--- Actual key capture is done via onRawInputEvent using the eventAdjustHook.
--- @param input_event table Input event structure (will be nil from event hooks)
--- @return boolean Always false to pass events through
-function BluetoothKeyBindings:onInputEvent(input_event)
-    return false
+        return
+    end
+
+    local action = self:getActionById(action_id)
+
+    if not action then
+        logger.warn("BluetoothKeyBindings: Unknown action:", action_id)
+
+        return
+    end
+
+    logger.dbg("BluetoothKeyBindings: Triggering action", action_id, "for key", key_name, "from device", device_mac)
+
+    if action.args then
+        UIManager:sendEvent(Event:new(action.event, action.args))
+    else
+        UIManager:sendEvent(Event:new(action.event))
+    end
 end
 
 ---
 -- Handles captured key press.
--- @param key string The key that was pressed (e.g., "BTRight", "BTGotoNextChapter")
+-- @param key string The key that was pressed (e.g., "KEY_16")
 -- @return boolean True to consume the event
 function BluetoothKeyBindings:captureKey(key)
     logger.dbg("BluetoothKeyBindings: Processing captured key:", key)
@@ -257,17 +362,6 @@ function BluetoothKeyBindings:captureKey(key)
     local device_mac = self.capture_device_mac
     local action_id = self.capture_action_id
     local callback = self.capture_callback
-
-    if key == "Back" or key == "Home" or key == "Menu" then
-        self:stopKeyCapture()
-
-        UIManager:show(InfoMessage:new({
-            text = _("Key capture cancelled"),
-            timeout = 2,
-        }))
-
-        return true
-    end
 
     self:stopKeyCapture()
 
@@ -279,7 +373,6 @@ function BluetoothKeyBindings:captureKey(key)
 
     self.device_bindings[device_mac][key_name] = action_id
 
-    self:applyBinding(device_mac, key_name, action_id)
     self:saveBindings()
 
     local action = self:getActionById(action_id)
@@ -440,11 +533,6 @@ end
 function BluetoothKeyBindings:clearDeviceBindings(device_mac)
     if not self.device_bindings[device_mac] then
         return
-    end
-
-    for key_name in pairs(self.device_bindings[device_mac]) do
-        local event_name = "BT_" .. device_mac:gsub(":", "") .. "_" .. key_name
-        self.key_events[event_name] = nil
     end
 
     self.device_bindings[device_mac] = nil
