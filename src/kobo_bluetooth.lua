@@ -31,6 +31,8 @@ local KoboBluetooth = InputContainer:extend({
     input_handler = nil,
     plugin = nil,
     dispatcher_registered_devices = {},
+    additional_footer_content_func = nil,
+    ui = nil,
 })
 
 ---
@@ -59,6 +61,7 @@ function KoboBluetooth:initWithPlugin(plugin)
 
     logger.info("KoboBluetooth: Initialized on MTK device")
 
+    self.ui = plugin.ui
     self.device_manager = DeviceManager:new()
     self.input_handler = InputDeviceHandler:new()
     self.plugin = plugin
@@ -79,6 +82,7 @@ function KoboBluetooth:initWithPlugin(plugin)
         logger.warn("KoboBluetooth: Cannot create key_bindings - plugin or settings not available")
     end
 
+    self:setupFooterContentGenerator()
     if self:isBluetoothEnabled() and not self.bluetooth_standby_prevented then
         logger.dbg("KoboBluetooth: Bluetooth enabled on startup, preventing standby.")
 
@@ -109,10 +113,137 @@ function KoboBluetooth:isBluetoothEnabled()
 end
 
 ---
+-- Checks if footer status display is enabled.
+-- @return boolean True if footer status should be shown (defaults to true)
+function KoboBluetooth:isFooterStatusEnabled()
+    if not self.plugin or not self.plugin.settings then
+        return true
+    end
+
+    local show_footer_status = self.plugin.settings.show_bluetooth_footer_status
+
+    if show_footer_status == nil then
+        return true
+    end
+
+    return show_footer_status
+end
+
+---
+-- Sets up the footer content generator function.
+-- This creates a function that will be called by ReaderFooter to display Bluetooth status.
+function KoboBluetooth:setupFooterContentGenerator()
+    self.additional_footer_content_func = function()
+        if not self:isDeviceSupported() then
+            return ""
+        end
+
+        if not self:isFooterStatusEnabled() then
+            return ""
+        end
+
+        if not self.ui or not self.ui.view or not self.ui.view.footer then
+            return ""
+        end
+
+        local footer = self.ui.view.footer
+
+        local function should_hide_when_disabled(footer_obj)
+            return footer_obj
+                and footer_obj.settings
+                and footer_obj.settings.all_at_once
+                and footer_obj.settings.hide_empty_generators
+        end
+
+        local is_enabled = self:isBluetoothEnabled()
+        local item_prefix = footer.settings and footer.settings.item_prefix or "icons"
+
+        local bluetooth_symbol_on = ""
+        local bluetooth_symbol_off = ""
+        local bluetooth_letter = "BT"
+
+        logger.dbg("KoboBluetooth: Generating footer content - is_enabled:", is_enabled, "item_prefix:", item_prefix)
+
+        if item_prefix == "icons" then
+            if is_enabled then
+                return bluetooth_symbol_on
+            end
+
+            if should_hide_when_disabled(footer) then
+                return ""
+            end
+
+            return bluetooth_symbol_off
+        end
+
+        if item_prefix == "compact_items" then
+            if is_enabled then
+                return bluetooth_symbol_on
+            end
+
+            if should_hide_when_disabled(footer) then
+                return ""
+            end
+
+            return bluetooth_symbol_off
+        end
+
+        if is_enabled then
+            return bluetooth_letter .. ": " .. _("On")
+        end
+
+        if should_hide_when_disabled(footer) then
+            return ""
+        end
+
+        return bluetooth_letter .. ": " .. _("Off")
+    end
+end
+
+---
+-- Adds Bluetooth status to the footer.
+-- Should be called when the reader UI is available.
+function KoboBluetooth:addAdditionalFooterContent(ui)
+    if not self:isDeviceSupported() then
+        return
+    end
+
+    if not ui or not ui.view or not ui.view.footer then
+        logger.warn("KoboBluetooth: Cannot add footer content - UI not available")
+
+        return
+    end
+
+    if self.additional_footer_content_func then
+        ui.view.footer:addAdditionalFooterContent(self.additional_footer_content_func)
+        logger.info("KoboBluetooth: Added Bluetooth status to footer")
+    end
+end
+
+---
+-- Removes Bluetooth status from the footer.
+-- Should be called during cleanup.
+function KoboBluetooth:removeAdditionalFooterContent(ui)
+    if not self:isDeviceSupported() then
+        return
+    end
+
+    if not ui or not ui.view or not ui.view.footer then
+        return
+    end
+
+    if self.additional_footer_content_func then
+        ui.view.footer:removeAdditionalFooterContent(self.additional_footer_content_func)
+        logger.info("KoboBluetooth: Removed Bluetooth status from footer")
+    end
+end
+
+---
 -- Emits BluetoothStateChanged event.
 -- @param state boolean True if Bluetooth is ON, false if OFF.
 function KoboBluetooth:emitBluetoothStateChangedEvent(state)
     UIManager:sendEvent(Event:new("BluetoothStateChanged", { state = state }))
+    UIManager:broadcastEvent(Event:new("RefreshAdditionalContent"))
 end
 
 ---
@@ -449,6 +580,38 @@ function KoboBluetooth:onConnectToBluetoothDevice(device_address)
 end
 
 ---
+-- Called when the reader UI is ready.
+-- Adds Bluetooth status to the footer.
+function KoboBluetooth:onReaderReady()
+    if not self:isDeviceSupported() then
+        return
+    end
+
+    if not self.ui then
+        logger.warn("KoboBluetooth: onReaderReady called but UI not available")
+
+        return
+    end
+
+    self:addAdditionalFooterContent(self.ui)
+end
+
+---
+-- Called when document is closed.
+-- Removes Bluetooth status from the footer.
+function KoboBluetooth:onCloseDocument()
+    if not self:isDeviceSupported() then
+        return
+    end
+
+    if not self.ui then
+        return
+    end
+
+    self:removeAdditionalFooterContent(self.ui)
+end
+
+---
 -- Connects to a Bluetooth device by address.
 -- @param address string The Bluetooth address of the device to connect to
 -- @return boolean True if connection was initiated, false otherwise
@@ -750,6 +913,21 @@ function KoboBluetooth:addToMainMenu(menu_items)
                             self.plugin.settings.enable_bluetooth_auto_resume =
                                 not self.plugin.settings.enable_bluetooth_auto_resume
                             self.plugin:saveSettings()
+                        end,
+                    },
+                    {
+                        text = _("Show status in footer"),
+                        help_text = _(
+                            "Display Bluetooth status in the reader's footer bar. Shows an icon or text indicating whether Bluetooth is enabled or disabled."
+                        ),
+                        checked_func = function()
+                            return self:isFooterStatusEnabled()
+                        end,
+                        callback = function()
+                            local current = self:isFooterStatusEnabled()
+                            self.plugin.settings.show_bluetooth_footer_status = not current
+                            self.plugin:saveSettings()
+                            UIManager:broadcastEvent(Event:new("RefreshAdditionalContent"))
                         end,
                     },
                 },
