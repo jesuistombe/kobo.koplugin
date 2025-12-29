@@ -1,6 +1,6 @@
 # Turn ON/OFF Bluetooth Stack
 
-## Turn ON Bluetooth
+## Turn On Bluetooth
 
 1. Start Bluetooth daemon:
 
@@ -27,7 +27,7 @@ dbus-send --system --print-reply \
     variant:boolean:true
 ```
 
-## Turn OFF Bluetooth
+## Turn Off Bluetooth
 
 1. Power off the adapter:
 

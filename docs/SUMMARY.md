@@ -71,6 +71,6 @@
       - [Input Device Mapping](./dev/investigations/bluetooth/mtk/06-input-device-mapping.md)
       - [Known Issues](./dev/investigations/bluetooth/mtk/05-known-issues.md)
     - [Libra 2](./dev/investigations/bluetooth/libra-2/00-overview.md)
-      - [Turn ON/OFF Stack](./dev/investigations/bluetooth/libra-2/01-initialization.md)
+      - [Turn On/Off Stack](./dev/investigations/bluetooth/libra-2/01-initialization.md)
       - [Operations](./dev/investigations/bluetooth/libra-2/02-operations.md)
       - [Connected Device Info](./dev/investigations/bluetooth/libra-2/03-input-device-mapping.md)
