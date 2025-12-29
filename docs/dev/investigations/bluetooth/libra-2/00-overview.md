@@ -3,7 +3,7 @@
 ## Device Information
 
 - **Model**: Kobo Libra 2
-- **Chipset**: Freescale i.MX6SLL (not MTK)
+- **Chipset**: Freescale i.MX6SLL
 - **Bluetooth Stack**: Standard Linux BlueZ
 - **D-Bus Service**: `org.bluez`
 
