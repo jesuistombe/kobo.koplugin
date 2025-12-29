@@ -3,17 +3,20 @@
 ## Turn ON Bluetooth
 
 1. Start Bluetooth daemon:
+
 ```bash
 /libexec/bluetooth/bluetoothd &
 ```
 
 2. Reset HCI interface:
+
 ```bash
 hciconfig hci0 down
 hciconfig hci0 up
 ```
 
 3. Power on the Bluetooth adapter:
+
 ```bash
 dbus-send --system --print-reply \
     --dest=org.bluez \
@@ -27,6 +30,7 @@ dbus-send --system --print-reply \
 ## Turn OFF Bluetooth
 
 1. Power off the adapter:
+
 ```bash
 dbus-send --system --print-reply \
     --dest=org.bluez \
@@ -38,6 +42,7 @@ dbus-send --system --print-reply \
 ```
 
 2. Stop Bluetooth daemon:
+
 ```bash
 killall bluetoothd
 ```

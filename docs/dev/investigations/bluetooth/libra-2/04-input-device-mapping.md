@@ -4,7 +4,7 @@ When connected, the Kobo Remote appears as:
 
 ```
 Device Path: /dev/input/event5
-Device Name: "Kobo Remote"  
+Device Name: "Kobo Remote"
 Bus Type: 0005 (Bluetooth HID)
 Handlers: kbd event5
 ```
@@ -30,7 +30,7 @@ The device symlink reveals it's a Bluetooth device:
 
 ```bash
 $ ls -la /sys/class/input/event5
-lrwxrwxrwx 1 root root 0 Dec 17 11:38 /sys/class/input/event5 -> 
+lrwxrwxrwx 1 root root 0 Dec 17 11:38 /sys/class/input/event5 ->
 ../../devices/virtual/misc/uhid/0005:000D:0000.0019/input/input29/event5
 ```
 
@@ -52,8 +52,10 @@ hexdump -C /dev/input/event5
 ## Key Code Mapping
 
 Common key codes from Kobo Remote:
+
 - `0x6c` (108) = `KEY_RIGHT` - Right button
-- `0x67` (103) = `KEY_UP` - Up button  
+- `0x67` (103) = `KEY_UP` - Up button
 - Other buttons map to standard Linux input key codes
 
-This allows button remapping and isolated input handling separate from the device's built-in controls.
+This allows button remapping and isolated input handling separate from the device's built-in
+controls.
