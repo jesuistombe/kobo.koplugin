@@ -1,4 +1,4 @@
-# Turn ON/OFF Bluetooth Stack
+# Turn On/Off Bluetooth Stack
 
 ## Turn On Bluetooth
 
